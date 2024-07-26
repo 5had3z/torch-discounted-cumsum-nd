@@ -25,7 +25,7 @@ __global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output
     for (auto idx = threadIdx.x; idx < scanDimSize; idx += gThreadBlockDim)
     {
         float data = static_cast<float>(input[blockIdx.x][idx]);
-        data += powf(inv_gamma, threadIdx.x + 1) * warp_agg.v;
+        data += (threadIdx.x == 0) * inv_gamma * warp_agg.v;
         P pair{static_cast<float>(idx), data};
         auto fn = [&](const P& a, const P& b)
         {
@@ -35,6 +35,7 @@ __global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output
         P result;
         WarpScan(tempStorage).InclusiveScan(pair, result, fn, warp_agg);
         output[blockIdx.x][idx] = static_cast<T>(result.v);
+        __syncwarp();
     }
 }
 
