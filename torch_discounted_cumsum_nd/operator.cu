@@ -3,19 +3,39 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/script.h>
 
-template <typename scalar_t>
-using TensorAcc4R = torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits>;
+#include <ranges>
 
-constexpr auto gBlockDim = 256;
+template <typename scalar_t>
+using TensorAcc2R = torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits>;
+
+constexpr auto gThreadBlockDim = 32;
 
 template <typename T>
-__global__ void forward_kernel(const TensorAcc4R<T> input, TensorAcc4R<T> output, double gamma)
+__global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output, float inv_gamma, int64_t scanDimSize)
 {
-    using BlockScan = cub::BlockScan<T, gBlockDim>;
-    __shared__ typename BlockScan::TempStorage tempStorage;
+    struct P
+    {
+        float i; // index
+        float v; // value
+    };
+    using WarpScan = cub::WarpScan<P>;
+    __shared__ typename WarpScan::TempStorage tempStorage;
 
-    T data;
-    BlockScan(tempStorage).InclusiveSum(data, data);
+    P warp_agg{0, 0};
+    for (auto idx = threadIdx.x; idx < scanDimSize; idx += gThreadBlockDim)
+    {
+        float data = static_cast<float>(input[blockIdx.x][idx]);
+        data += powf(inv_gamma, threadIdx.x + 1) * warp_agg.v;
+        P pair{static_cast<float>(idx), data};
+        auto fn = [&](const P& a, const P& b)
+        {
+            float c = powf(inv_gamma, b.i - a.i);
+            return P{b.i, fma(a.v, c, b.v)};
+        };
+        P result;
+        WarpScan(tempStorage).InclusiveScan(pair, result, fn, warp_agg);
+        output[blockIdx.x][idx] = static_cast<T>(result.v);
+    }
 }
 
 [[nodiscard]] auto permute_target_last(const torch::Tensor& input, int64_t dim) -> torch::Tensor
@@ -44,11 +64,16 @@ __global__ void forward_kernel(const TensorAcc4R<T> input, TensorAcc4R<T> output
 
 auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
-    const auto channelDim = input.size(dim);
+    if (dim < 0) // wrap to [0,ndim]
+    {
+        dim += input.ndimension();
+    }
+    const bool isLastDim = dim == (input.ndimension() - 1);
+    const auto scanDimSize = input.size(dim);
     const std::vector inputShape(input.sizes().begin(), input.sizes().end());
 
     torch::Tensor input_;
-    if (dim != input.ndimension() - 1)
+    if (!isLastDim)
     {
         input_ = permute_target_last(input, dim);
     }
@@ -63,20 +88,32 @@ auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Te
     // Flatten to batch
     input_ = input_.flatten(0, -2);
     auto output_ = output.flatten(0, -2);
+    if (!output_.is_contiguous())
+    {
+        throw std::runtime_error("expected output to be contiguous");
+    }
+    if (!input_.is_contiguous())
+    {
+        throw std::runtime_error("expected input to be contiguous");
+    }
 
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
+    const dim3 threadsPerBlock(gThreadBlockDim);
+    std::cout << "launching with grid " << blocksGrid.x << std::endl;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_kernel",
         [&]()
         {
-            cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-            const dim3 blocksGrid(input.size(0), input.size(1), 1);
-            const dim3 threadsPerBlock(gBlockDim);
-
             auto input_acc = input_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
             auto output_acc = output_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
-            forward_kernel<scalar_t><<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, gamma);
+            forward_kernel<scalar_t>
+                <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, scanDimSize);
         });
+    cudaStreamSynchronize(stream);
 
-    if (dim != input.ndimension() - 1)
+    std::cout << "done " << cudaGetErrorName(cudaGetLastError()) << std::endl;
+
+    if (!isLastDim)
     {
         output = restore_input_shape(output, dim);
     }
@@ -85,7 +122,7 @@ auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Te
 }
 
 template <typename T>
-__global__ void backward_kernel(const TensorAcc4R<T> input, TensorAcc4R<T> output, double gamma)
+__global__ void backward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output, double gamma)
 {
 }
 
@@ -93,7 +130,7 @@ auto backward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::T
 {
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const dim3 blocksGrid(input.size(0), input.size(1), 1);
-    const dim3 threadsPerBlock(gBlockDim);
+    const dim3 threadsPerBlock(gThreadBlockDim);
 
     auto output = torch::zeros_like(input);
 

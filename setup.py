@@ -10,7 +10,12 @@ if __name__ == "__main__":
     setup(
         ext_modules=[
             CUDAExtension(
-                "torch_discounted_cumsum_nd", ["torch_discounted_cumsum_nd/operator.cu"]
+                "torch_discounted_cumsum_nd",
+                ["torch_discounted_cumsum_nd/operator.cu"],
+                extra_compile_args={
+                    "cxx": ["-g", "-std=c++20"],
+                    "nvcc": ["-std=c++20"],
+                },
             )
         ],
         cmdclass={"build_ext": BuildExtension},
