@@ -126,7 +126,7 @@ __global__ void backward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> outpu
         P pair{static_cast<float>(idx), data};
         auto fn = [&](const P& a, const P& b)
         {
-            float c = powf(inv_gamma, b.i - a.i);
+            float c = powf(inv_gamma, a.i - b.i);
             return P{b.i, fma(a.v, c, b.v)};
         };
         P result;
