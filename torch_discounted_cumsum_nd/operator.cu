@@ -56,9 +56,10 @@ __global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output
 
 [[nodiscard]] auto restore_input_shape(const torch::Tensor& input, int64_t dim) -> torch::Tensor
 {
-    std::vector<int64_t> dims;
-    dims.reserve(input.ndimension());
-    std::iota(dims.begin(), dims.end() - 1, 0);
+    // Allocate target size then remove last element by resizing
+    std::vector<int64_t> dims(input.ndimension());
+    dims.resize(dims.size() - 1);
+    std::iota(dims.begin(), dims.end(), 0);
     dims.insert(dims.begin() + dim, input.ndimension() - 1);
     return input.permute(dims).contiguous();
 }
@@ -101,7 +102,6 @@ auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Te
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
     const dim3 threadsPerBlock(gThreadBlockDim);
-    std::cout << "launching with grid " << blocksGrid.x << std::endl;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_kernel",
         [&]()
         {
@@ -110,9 +110,6 @@ auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Te
             forward_kernel<scalar_t>
                 <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, scanDimSize);
         });
-    cudaStreamSynchronize(stream);
-
-    std::cout << "done " << cudaGetErrorName(cudaGetLastError()) << std::endl;
 
     if (!isLastDim)
     {
