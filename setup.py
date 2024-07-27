@@ -13,8 +13,8 @@ if __name__ == "__main__":
                 "torch_discounted_cumsum_nd",
                 ["torch_discounted_cumsum_nd/operator.cu"],
                 extra_compile_args={
-                    "cxx": ["-g", "-std=c++20"],
-                    "nvcc": ["-std=c++20"],
+                    "cxx": ["-O3", "-std=c++17"],
+                    "nvcc": ["-O2", "-std=c++17"],
                 },
             )
         ],

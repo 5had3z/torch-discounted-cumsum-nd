@@ -3,7 +3,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/script.h>
 
-#include <ranges>
+#include <execution>
 
 template <typename scalar_t>
 using TensorAcc2R = torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits>;
@@ -229,7 +229,8 @@ auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch
             {
                 const auto inPtr = static_cast<scalar_t*>(input_.data_ptr()) + bidx * input_.stride(0);
                 auto outPtr = static_cast<scalar_t*>(output_.data_ptr()) + bidx * output_.stride(0);
-                std::inclusive_scan(inPtr, inPtr + input.stride(0), outPtr, [&](scalar_t a, scalar_t b) -> scalar_t
+                std::inclusive_scan(std::execution::unseq, inPtr, inPtr + input.stride(0), outPtr,
+                    [&](scalar_t a, scalar_t b) -> scalar_t
                     { return std::fma(a, static_cast<scalar_t>(1 / gamma), b); });
             }
         });
@@ -276,7 +277,7 @@ auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torc
             {
                 const auto inPtr = static_cast<scalar_t*>(input_.data_ptr()) + bidx * input_.stride(0);
                 auto outPtr = static_cast<scalar_t*>(output_.data_ptr()) + bidx * output_.stride(0);
-                std::inclusive_scan(std::make_reverse_iterator(inPtr + input_.stride(0)),
+                std::inclusive_scan(std::execution::unseq, std::make_reverse_iterator(inPtr + input_.stride(0)),
                     std::make_reverse_iterator(inPtr), std::make_reverse_iterator(outPtr + output_.stride(0)),
                     [&](scalar_t a, scalar_t b) -> scalar_t
                     { return std::fma(a, static_cast<scalar_t>(1 / gamma), b); });
