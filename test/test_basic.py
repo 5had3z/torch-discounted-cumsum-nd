@@ -5,9 +5,9 @@ from torch import Tensor
 from torch_discounted_cumsum_nd import discounted_cumsum
 
 
-@pytest.fixture
-def basic_data():
-    data = torch.randn(4, 124, device="cuda", dtype=torch.float32)
+@pytest.fixture(params=["cpu", "cuda"])
+def basic_data(request):
+    data = torch.randn(4, 124, device=request.param, dtype=torch.float32)
     return data
 
 

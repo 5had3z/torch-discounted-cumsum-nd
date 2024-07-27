@@ -35,6 +35,12 @@ constexpr auto gThreadBlockDim = 32;
     return input.permute(dims);
 }
 
+TORCH_LIBRARY(discounted_cumsum, m)
+{
+    m.def("discounted_cumsum(Tensor input, int dim, float gamma) -> Tensor");
+    m.def("_discounted_cumsum_bw(Tensor input, int dim, float gamma) -> Tensor");
+}
+
 struct P
 {
     float i; // index
@@ -66,7 +72,7 @@ __global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output
     }
 }
 
-auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
+auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
     if (dim < 0) // wrap to [0,ndim]
     {
@@ -136,7 +142,7 @@ __global__ void backward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> outpu
     }
 }
 
-auto backward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
+auto backward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
     if (dim < 0) // wrap to [0,ndim]
     {
@@ -181,18 +187,112 @@ auto backward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::T
     }
 
     return output;
-
-    return output;
-}
-
-TORCH_LIBRARY(discounted_cumsum, m)
-{
-    m.def("discounted_cumsum(Tensor input, int dim, float gamma) -> Tensor");
-    m.def("_discounted_cumsum_bw(Tensor input, int dim, float gamma) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(discounted_cumsum, CUDA, m)
 {
-    m.impl("discounted_cumsum", &forward);
-    m.impl("_discounted_cumsum_bw", &backward);
+    m.impl("discounted_cumsum", &forward_cuda);
+    m.impl("_discounted_cumsum_bw", &backward_cuda);
+}
+
+auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
+{
+    if (dim < 0) // wrap to [0,ndim]
+    {
+        dim += input.ndimension();
+    }
+    const bool isLastDim = dim == (input.ndimension() - 1);
+    const auto scanDimSize = input.size(dim);
+    const std::vector inputShape(input.sizes().begin(), input.sizes().end());
+
+    torch::Tensor input_;
+    if (!isLastDim)
+    {
+        input_ = permute_target_last(input, dim);
+    }
+    else
+    {
+        input_ = input;
+    }
+
+    // Create initially as permuted input
+    auto output = torch::zeros_like(input_);
+
+    // Flatten to batch and ensure contiguous
+    input_ = input_.flatten(0, -2).contiguous();
+    auto output_ = output.flatten(0, -2).contiguous();
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_kernel",
+        [&]()
+        {
+            for (auto bidx = 0; bidx < input_.size(0); ++bidx)
+            {
+                const auto inPtr = static_cast<scalar_t*>(input_.data_ptr()) + bidx * input_.stride(0);
+                auto outPtr = static_cast<scalar_t*>(output_.data_ptr()) + bidx * output_.stride(0);
+                std::inclusive_scan(inPtr, inPtr + input.stride(0), outPtr, [&](scalar_t a, scalar_t b) -> scalar_t
+                    { return std::fma(a, static_cast<scalar_t>(1 / gamma), b); });
+            }
+        });
+
+    if (!isLastDim)
+    {
+        output = restore_input_shape(output, dim);
+    }
+
+    return output;
+}
+
+auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
+{
+    if (dim < 0) // wrap to [0,ndim]
+    {
+        dim += input.ndimension();
+    }
+    const bool isLastDim = dim == (input.ndimension() - 1);
+    const auto scanDimSize = input.size(dim);
+    const std::vector inputShape(input.sizes().begin(), input.sizes().end());
+
+    torch::Tensor input_;
+    if (!isLastDim)
+    {
+        input_ = permute_target_last(input, dim);
+    }
+    else
+    {
+        input_ = input;
+    }
+
+    // Create initially as permuted input
+    auto output = torch::zeros_like(input_);
+
+    // Flatten to batch and ensure contiguous
+    input_ = input_.flatten(0, -2).contiguous();
+    auto output_ = output.flatten(0, -2).contiguous();
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_kernel",
+        [&]()
+        {
+            for (auto bidx = 0; bidx < input_.size(0); ++bidx)
+            {
+                const auto inPtr = static_cast<scalar_t*>(input_.data_ptr()) + bidx * input_.stride(0);
+                auto outPtr = static_cast<scalar_t*>(output_.data_ptr()) + bidx * output_.stride(0);
+                std::inclusive_scan(std::make_reverse_iterator(inPtr + input_.stride(0)),
+                    std::make_reverse_iterator(inPtr), std::make_reverse_iterator(outPtr + output_.stride(0)),
+                    [&](scalar_t a, scalar_t b) -> scalar_t
+                    { return std::fma(a, static_cast<scalar_t>(1 / gamma), b); });
+            }
+        });
+
+    if (!isLastDim)
+    {
+        output = restore_input_shape(output, dim);
+    }
+
+    return output;
+}
+
+TORCH_LIBRARY_IMPL(discounted_cumsum, CPU, m)
+{
+    m.impl("discounted_cumsum", &forward_cpu);
+    m.impl("_discounted_cumsum_bw", &backward_cpu);
 }
