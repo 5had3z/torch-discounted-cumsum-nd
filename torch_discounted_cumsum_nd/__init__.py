@@ -31,7 +31,7 @@ def discounted_cumsum(x: Tensor, dim: int = -1, gamma: float = 2) -> Tensor:
     r"""
     Discounted cumsum where each element is calculated with the formula
     .. math::
-        \text{{out}}_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{j-i}\text{in}_j.
+        \text{{out}}_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{i-j}\text{in}_j.
 
     Args:
         x (Tensor): N-D Tensor to apply operation

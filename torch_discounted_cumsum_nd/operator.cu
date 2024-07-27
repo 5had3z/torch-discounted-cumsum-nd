@@ -10,6 +10,31 @@ using TensorAcc2R = torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPt
 
 constexpr auto gThreadBlockDim = 32;
 
+[[nodiscard]] auto permute_target_last(const torch::Tensor& input, int64_t dim) -> torch::Tensor
+{
+    std::vector<int64_t> dims;
+    dims.reserve(input.ndimension());
+    for (int64_t i = 0; i < input.ndimension(); ++i)
+    {
+        if (i != dim)
+        {
+            dims.emplace_back(i);
+        }
+    }
+    dims.emplace_back(dim);
+    return input.permute(dims);
+}
+
+[[nodiscard]] auto restore_input_shape(const torch::Tensor& input, int64_t dim) -> torch::Tensor
+{
+    // Allocate target size then remove last element by resizing
+    std::vector<int64_t> dims(input.ndimension());
+    dims.resize(dims.size() - 1);
+    std::iota(dims.begin(), dims.end(), 0);
+    dims.insert(dims.begin() + dim, input.ndimension() - 1);
+    return input.permute(dims);
+}
+
 struct P
 {
     float i; // index
@@ -41,31 +66,6 @@ __global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output
     }
 }
 
-[[nodiscard]] auto permute_target_last(const torch::Tensor& input, int64_t dim) -> torch::Tensor
-{
-    std::vector<int64_t> dims;
-    dims.reserve(input.ndimension());
-    for (int64_t i = 0; i < input.ndimension(); ++i)
-    {
-        if (i != dim)
-        {
-            dims.emplace_back(i);
-        }
-    }
-    dims.emplace_back(dim);
-    return input.permute(dims);
-}
-
-[[nodiscard]] auto restore_input_shape(const torch::Tensor& input, int64_t dim) -> torch::Tensor
-{
-    // Allocate target size then remove last element by resizing
-    std::vector<int64_t> dims(input.ndimension());
-    dims.resize(dims.size() - 1);
-    std::iota(dims.begin(), dims.end(), 0);
-    dims.insert(dims.begin() + dim, input.ndimension() - 1);
-    return input.permute(dims);
-}
-
 auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
     if (dim < 0) // wrap to [0,ndim]
@@ -92,14 +92,6 @@ auto forward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Te
     // Flatten to batch and ensure contiguous
     input_ = input_.flatten(0, -2).contiguous();
     auto output_ = output.flatten(0, -2).contiguous();
-    if (!output_.is_contiguous())
-    {
-        throw std::runtime_error("expected output to be contiguous");
-    }
-    if (!input_.is_contiguous())
-    {
-        throw std::runtime_error("expected input to be contiguous");
-    }
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
@@ -127,7 +119,7 @@ __global__ void backward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> outpu
     __shared__ StorageT tempStorage;
 
     P warp_agg{0, 0};
-    for (int idx = scanDimSize - threadIdx.x; idx >= 0; idx -= gThreadBlockDim)
+    for (int idx = scanDimSize - threadIdx.x - 1; idx >= 0; idx -= gThreadBlockDim)
     {
         float data = static_cast<float>(input[blockIdx.x][idx]);
         data += (threadIdx.x == 0) * inv_gamma * warp_agg.v;
@@ -170,14 +162,6 @@ auto backward(const torch::Tensor& input, int64_t dim, double gamma) -> torch::T
     // Flatten to batch and ensure contiguous
     input_ = input_.flatten(0, -2).contiguous();
     auto output_ = output.flatten(0, -2).contiguous();
-    if (!output_.is_contiguous())
-    {
-        throw std::runtime_error("expected output to be contiguous");
-    }
-    if (!input_.is_contiguous())
-    {
-        throw std::runtime_error("expected input to be contiguous");
-    }
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
