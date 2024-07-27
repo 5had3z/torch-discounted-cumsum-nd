@@ -10,11 +10,11 @@ using TensorAcc2R = torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPt
 
 constexpr auto gThreadBlockDim = 32;
 
-[[nodiscard]] auto permute_target_last(const torch::Tensor& input, int64_t dim) -> torch::Tensor
+[[nodiscard]] auto getForwardPermutation(int64_t ndim, int64_t dim) -> std::vector<int64_t>
 {
     std::vector<int64_t> dims;
-    dims.reserve(input.ndimension());
-    for (int64_t i = 0; i < input.ndimension(); ++i)
+    dims.reserve(ndim);
+    for (int64_t i = 0; i < ndim; ++i)
     {
         if (i != dim)
         {
@@ -22,17 +22,48 @@ constexpr auto gThreadBlockDim = 32;
         }
     }
     dims.emplace_back(dim);
-    return input.permute(dims);
+    return dims;
 }
 
-[[nodiscard]] auto restore_input_shape(const torch::Tensor& input, int64_t dim) -> torch::Tensor
+[[nodiscard]] auto getReversePermutation(int64_t ndim, int64_t dim) -> std::vector<int64_t>
 {
     // Allocate target size then remove last element by resizing
-    std::vector<int64_t> dims(input.ndimension());
+    std::vector<int64_t> dims(ndim);
     dims.resize(dims.size() - 1);
     std::iota(dims.begin(), dims.end(), 0);
-    dims.insert(dims.begin() + dim, input.ndimension() - 1);
-    return input.permute(dims);
+    dims.insert(dims.begin() + dim, ndim - 1);
+    return dims;
+}
+
+[[nodiscard]] auto prepareInput(const torch::Tensor& input, int64_t dim) -> torch::Tensor
+{
+    torch::Tensor input_ = input;
+    if (dim != (input.ndimension() - 1))
+    {
+        input_ = input_.permute(getForwardPermutation(input.ndimension(), dim));
+    }
+    return input_.flatten(0, -2).contiguous();
+}
+
+[[nodiscard]] auto getPermutedShape(c10::IntArrayRef inShape, int64_t dim) -> std::vector<int64_t>
+{
+    std::vector permShape(inShape.begin(), inShape.end());
+    if (dim != inShape.size() - 1)
+    {
+        const auto targetDim = permShape.begin() + dim;
+        std::rotate(std::execution::unseq, targetDim, targetDim + 1, permShape.end());
+    }
+    return permShape;
+}
+
+void restoreOutputShape(torch::Tensor& output, c10::IntArrayRef inShape, int64_t dim)
+{
+    output = output.reshape(getPermutedShape(inShape, dim));
+    if (dim != (output.ndimension() - 1))
+    {
+        output = output.permute(getReversePermutation(output.ndimension(), dim));
+    }
+    output = output.contiguous();
 }
 
 TORCH_LIBRARY(discounted_cumsum, m)
@@ -78,45 +109,23 @@ auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torc
     {
         dim += input.ndimension();
     }
-    const bool isLastDim = dim == (input.ndimension() - 1);
-    const auto scanDimSize = input.size(dim);
-    const std::vector inputShape(input.sizes().begin(), input.sizes().end());
-
-    torch::Tensor input_;
-    if (!isLastDim)
-    {
-        input_ = permute_target_last(input, dim);
-    }
-    else
-    {
-        input_ = input;
-    }
-
-    // Create initially as permuted input
-    auto output = torch::zeros_like(input_);
-
-    // Flatten to batch and ensure contiguous
-    input_ = input_.flatten(0, -2).contiguous();
-    auto output_ = output.flatten(0, -2).contiguous();
+    torch::Tensor input_ = prepareInput(input, dim);
+    auto output_ = torch::zeros_like(input_);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
     const dim3 threadsPerBlock(gThreadBlockDim);
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_kernel",
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cuda",
         [&]()
         {
             auto input_acc = input_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
             auto output_acc = output_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
             forward_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, scanDimSize);
+                <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, input_.size(1));
         });
 
-    if (!isLastDim)
-    {
-        output = restore_input_shape(output, dim);
-    }
-
-    return output;
+    restoreOutputShape(output_, input.sizes(), dim);
+    return output_;
 }
 
 template <typename T>
@@ -148,45 +157,23 @@ auto backward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> tor
     {
         dim += input.ndimension();
     }
-    const bool isLastDim = dim == (input.ndimension() - 1);
-    const auto scanDimSize = input.size(dim);
-    const std::vector inputShape(input.sizes().begin(), input.sizes().end());
-
-    torch::Tensor input_;
-    if (!isLastDim)
-    {
-        input_ = permute_target_last(input, dim);
-    }
-    else
-    {
-        input_ = input;
-    }
-
-    // Create initially as permuted input
-    auto output = torch::zeros_like(input_);
-
-    // Flatten to batch and ensure contiguous
-    input_ = input_.flatten(0, -2).contiguous();
-    auto output_ = output.flatten(0, -2).contiguous();
+    torch::Tensor input_ = prepareInput(input, dim);
+    auto output_ = torch::zeros_like(input_);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
     const dim3 threadsPerBlock(gThreadBlockDim);
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_kernel",
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cuda",
         [&]()
         {
             auto input_acc = input_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
             auto output_acc = output_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
             backward_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, scanDimSize);
+                <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, input_.size(1));
         });
 
-    if (!isLastDim)
-    {
-        output = restore_input_shape(output, dim);
-    }
-
-    return output;
+    restoreOutputShape(output_, input.sizes(), dim);
+    return output_;
 }
 
 TORCH_LIBRARY_IMPL(discounted_cumsum, CUDA, m)
@@ -201,28 +188,10 @@ auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch
     {
         dim += input.ndimension();
     }
-    const bool isLastDim = dim == (input.ndimension() - 1);
-    const auto scanDimSize = input.size(dim);
-    const std::vector inputShape(input.sizes().begin(), input.sizes().end());
+    torch::Tensor input_ = prepareInput(input, dim);
+    auto output_ = torch::zeros_like(input_);
 
-    torch::Tensor input_;
-    if (!isLastDim)
-    {
-        input_ = permute_target_last(input, dim);
-    }
-    else
-    {
-        input_ = input;
-    }
-
-    // Create initially as permuted input
-    auto output = torch::zeros_like(input_);
-
-    // Flatten to batch and ensure contiguous
-    input_ = input_.flatten(0, -2).contiguous();
-    auto output_ = output.flatten(0, -2).contiguous();
-
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_kernel",
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cpu",
         [&]()
         {
             for (auto bidx = 0; bidx < input_.size(0); ++bidx)
@@ -235,12 +204,8 @@ auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch
             }
         });
 
-    if (!isLastDim)
-    {
-        output = restore_input_shape(output, dim);
-    }
-
-    return output;
+    restoreOutputShape(output_, input.sizes(), dim);
+    return output_;
 }
 
 auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
@@ -249,28 +214,10 @@ auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torc
     {
         dim += input.ndimension();
     }
-    const bool isLastDim = dim == (input.ndimension() - 1);
-    const auto scanDimSize = input.size(dim);
-    const std::vector inputShape(input.sizes().begin(), input.sizes().end());
+    torch::Tensor input_ = prepareInput(input, dim);
+    auto output_ = torch::zeros_like(input_);
 
-    torch::Tensor input_;
-    if (!isLastDim)
-    {
-        input_ = permute_target_last(input, dim);
-    }
-    else
-    {
-        input_ = input;
-    }
-
-    // Create initially as permuted input
-    auto output = torch::zeros_like(input_);
-
-    // Flatten to batch and ensure contiguous
-    input_ = input_.flatten(0, -2).contiguous();
-    auto output_ = output.flatten(0, -2).contiguous();
-
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_kernel",
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cpu",
         [&]()
         {
             for (auto bidx = 0; bidx < input_.size(0); ++bidx)
@@ -284,12 +231,8 @@ auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torc
             }
         });
 
-    if (!isLastDim)
-    {
-        output = restore_input_shape(output, dim);
-    }
-
-    return output;
+    restoreOutputShape(output_, input.sizes(), dim);
+    return output_;
 }
 
 TORCH_LIBRARY_IMPL(discounted_cumsum, CPU, m)
