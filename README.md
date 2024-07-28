@@ -1,6 +1,6 @@
 # torch-discounted-cumsum-nd
 
-$$\text{{out}}_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{i-j}\text{in}_j$$
+$$y_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{i-j}x_j$$
 
 ## Installation
 
