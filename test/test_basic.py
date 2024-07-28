@@ -10,11 +10,16 @@ def make_data(shape: Sequence[int], device: str):
     return torch.randn(shape, device=device, dtype=torch.float32)
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("dim", [-1, 0, 1])
-def test_no_weighting(device: str, dim: int):
+_TEST_DEVICES = ["cpu", "cuda"]
+_TEST_SHAPES = [(4, 32), (12, 128, 30), (4, 32, 64), (4, 128, 99)]
+
+
+@pytest.mark.parametrize("dim", [0, -1])
+@pytest.mark.parametrize("device", _TEST_DEVICES)
+@pytest.mark.parametrize("shape", _TEST_SHAPES)
+def test_no_weighting_last_dim(dim: int, device: str, shape: tuple[int, ...]):
     """Test forward method is correct compared against simple cumsum on last dim"""
-    data = make_data((4, 124), device)
+    data = make_data(shape, device)
     baseline = torch.cumsum(data, dim=dim)
     target = discounted_cumsum(data, dim=dim, gamma=1)
     # For small numbers, there can be a difference which is greater than the default
@@ -22,11 +27,12 @@ def test_no_weighting(device: str, dim: int):
     assert torch.allclose(baseline, target, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("dim", [-1, 0, 1])
-def test_backward_no_weighting(device: str, dim: int):
+@pytest.mark.parametrize("dim", [0, -1])
+@pytest.mark.parametrize("device", _TEST_DEVICES)
+@pytest.mark.parametrize("shape", _TEST_SHAPES)
+def test_backward_no_weighting(dim: int, device: str, shape: tuple[int, ...]):
     """Test backward method is correct compared against simple cumsum on last dim"""
-    data = make_data((4, 124), device)
+    data = make_data(shape, device)
     test_grad = torch.empty_like(data)
     baseline_grad = torch.empty_like(data)
 

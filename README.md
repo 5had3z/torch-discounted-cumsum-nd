@@ -28,7 +28,7 @@ ret.sum().backward()
 
 ## General Notes
 
-Simple auto-grad supported operation that applies a weighted inclusive-scan on the input data. CUDA implementation iterates over the target dimension with cub::WarpScan so should be reasonably quick. Parallelism is mainly utilized used batch the other dimensions. CPU implementation uses std::inclusive_scan with std::execution::unseq so you'll need TBB or whatever other std::execution provider installed on your machine.
+Simple auto-grad supported operation that applies a weighted inclusive-scan on the input data across dimension `D` of a tensor of any number of dimension. I designed the implementation with my own selfish needs foremost, hence it is optimised for `D << other dims`. The CUDA implementation iterates over the target dimension with cub::WarpScan so should be reasonably quick. Block-Parallelism is mainly utilized used batch over the other dimensions. Future work to target the case where `D` is not small could use cub::BlockScan instead. CPU implementation uses std::inclusive_scan with std::execution::unseq so you'll need TBB or whatever other std::execution provider installed on your machine.
 
 $$ \text{{out}}_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{i-j}\text{in}_j.$$
 

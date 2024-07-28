@@ -109,23 +109,23 @@ auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torc
     {
         dim += input.ndimension();
     }
-    torch::Tensor input_ = prepareInput(input, dim);
-    auto output_ = torch::zeros_like(input_);
+    torch::Tensor inputFlat = prepareInput(input, dim);
+    auto output = torch::zeros_like(inputFlat);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
+    const dim3 blocksGrid(static_cast<unsigned int>(inputFlat.size(0)));
     const dim3 threadsPerBlock(gThreadBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cuda",
         [&]()
         {
-            auto input_acc = input_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
-            auto output_acc = output_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
+            auto inputAcc = inputFlat.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
+            auto outputAcc = output.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
             forward_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, input_.size(1));
+                <<<blocksGrid, threadsPerBlock, 0, stream>>>(inputAcc, outputAcc, 1.f / gamma, inputFlat.size(1));
         });
 
-    restoreOutputShape(output_, input.sizes(), dim);
-    return output_;
+    restoreOutputShape(output, input.sizes(), dim);
+    return output;
 }
 
 template <typename T>
@@ -157,23 +157,23 @@ auto backward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> tor
     {
         dim += input.ndimension();
     }
-    torch::Tensor input_ = prepareInput(input, dim);
-    auto output_ = torch::zeros_like(input_);
+    torch::Tensor inputFlat = prepareInput(input, dim);
+    auto output = torch::zeros_like(inputFlat);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    const dim3 blocksGrid(static_cast<unsigned int>(input_.size(0)));
+    const dim3 blocksGrid(static_cast<unsigned int>(inputFlat.size(0)));
     const dim3 threadsPerBlock(gThreadBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cuda",
         [&]()
         {
-            auto input_acc = input_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
-            auto output_acc = output_.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
+            auto inputAcc = inputFlat.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
+            auto outputAcc = output.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
             backward_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, 0, stream>>>(input_acc, output_acc, 1.f / gamma, input_.size(1));
+                <<<blocksGrid, threadsPerBlock, 0, stream>>>(inputAcc, outputAcc, 1.f / gamma, inputFlat.size(1));
         });
 
-    restoreOutputShape(output_, input.sizes(), dim);
-    return output_;
+    restoreOutputShape(output, input.sizes(), dim);
+    return output;
 }
 
 TORCH_LIBRARY_IMPL(discounted_cumsum, CUDA, m)
@@ -188,24 +188,24 @@ auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch
     {
         dim += input.ndimension();
     }
-    torch::Tensor input_ = prepareInput(input, dim);
-    auto output_ = torch::zeros_like(input_);
+    torch::Tensor inputFlat = prepareInput(input, dim);
+    auto output = torch::zeros_like(inputFlat);
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cpu",
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cpu",
         [&]()
         {
-            for (auto bidx = 0; bidx < input_.size(0); ++bidx)
+            for (auto bidx = 0; bidx < inputFlat.size(0); ++bidx)
             {
-                const auto inPtr = static_cast<scalar_t*>(input_.data_ptr()) + bidx * input_.stride(0);
-                auto outPtr = static_cast<scalar_t*>(output_.data_ptr()) + bidx * output_.stride(0);
-                std::inclusive_scan(std::execution::unseq, inPtr, inPtr + input.stride(0), outPtr,
+                const auto inPtr = static_cast<scalar_t*>(inputFlat.data_ptr()) + bidx * inputFlat.stride(0);
+                auto outPtr = static_cast<scalar_t*>(output.data_ptr()) + bidx * output.stride(0);
+                std::inclusive_scan(std::execution::unseq, inPtr, inPtr + inputFlat.stride(0), outPtr,
                     [&](scalar_t a, scalar_t b) -> scalar_t
                     { return std::fma(a, static_cast<scalar_t>(1 / gamma), b); });
             }
         });
 
-    restoreOutputShape(output_, input.sizes(), dim);
-    return output_;
+    restoreOutputShape(output, input.sizes(), dim);
+    return output;
 }
 
 auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
@@ -214,25 +214,25 @@ auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torc
     {
         dim += input.ndimension();
     }
-    torch::Tensor input_ = prepareInput(input, dim);
-    auto output_ = torch::zeros_like(input_);
+    torch::Tensor inputFlat = prepareInput(input, dim);
+    auto output = torch::zeros_like(inputFlat);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cpu",
         [&]()
         {
-            for (auto bidx = 0; bidx < input_.size(0); ++bidx)
+            for (auto bidx = 0; bidx < inputFlat.size(0); ++bidx)
             {
-                const auto inPtr = static_cast<scalar_t*>(input_.data_ptr()) + bidx * input_.stride(0);
-                auto outPtr = static_cast<scalar_t*>(output_.data_ptr()) + bidx * output_.stride(0);
-                std::inclusive_scan(std::execution::unseq, std::make_reverse_iterator(inPtr + input_.stride(0)),
-                    std::make_reverse_iterator(inPtr), std::make_reverse_iterator(outPtr + output_.stride(0)),
+                const auto inPtr = static_cast<scalar_t*>(inputFlat.data_ptr()) + bidx * inputFlat.stride(0);
+                auto outPtr = static_cast<scalar_t*>(output.data_ptr()) + bidx * output.stride(0);
+                std::inclusive_scan(std::execution::unseq, std::make_reverse_iterator(inPtr + inputFlat.stride(0)),
+                    std::make_reverse_iterator(inPtr), std::make_reverse_iterator(outPtr + output.stride(0)),
                     [&](scalar_t a, scalar_t b) -> scalar_t
                     { return std::fma(a, static_cast<scalar_t>(1 / gamma), b); });
             }
         });
 
-    restoreOutputShape(output_, input.sizes(), dim);
-    return output_;
+    restoreOutputShape(output, input.sizes(), dim);
+    return output;
 }
 
 TORCH_LIBRARY_IMPL(discounted_cumsum, CPU, m)
