@@ -32,13 +32,15 @@ def discounted_cumsum(x: Tensor, dim: int = -1, gamma: float = 2) -> Tensor:
     Discounted cumsum where each element is calculated with the formula
     .. math::
         \text{{out}}_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{i-j}\text{in}_j.
+    Gamma == 1 is a normal cumsum, gamma < 1 will blow up quickly so is disabled.
 
     Args:
         x (Tensor): N-D Tensor to apply operation
         dim (int, optional): Dimension to apply discounted cumsum over. Defaults to -1.
-        discount (float, optional): Gamma factor to the cumsum. Defaults to 2.
+        discount (float, optional): Gamma factor to the cumsum, must be >=1. Defaults to 2.
 
     Returns:
         Tensor: Discounted cumsum result
     """
+    assert gamma >= 1, "Gamma should be >=1, you'll get inf/nan quickly otherwise"
     return torch.ops.discounted_cumsum.discounted_cumsum(x, dim, gamma)
