@@ -1,5 +1,7 @@
 # torch-discounted-cumsum-nd
 
+$$\text{{out}}_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{i-j}\text{in}_j$$
+
 ## Installation
 
 This Package utilizes the new Pytorch 2.4 API for C++/Autograd bindings, hence that is a must for compatibility. Otherwise should be installable with setup.py...
@@ -27,8 +29,6 @@ ret.sum().backward()
 ## General Notes
 
 Simple auto-grad supported operation that applies a weighted inclusive-scan on the input data across dimension `D` of a tensor of any number of dimension. I designed the implementation with my own selfish needs foremost, hence it is optimised for `D << other dims`. The CUDA implementation iterates over the target dimension with cub::WarpScan so should be reasonably quick. Block-Parallelism is mainly utilized used batch over the other dimensions. Future work to target the case where `D` is not small could use cub::BlockScan instead. CPU implementation uses std::inclusive_scan with std::execution::unseq so you'll need TBB or whatever other std::execution provider installed on your machine.
-
-$$ \text{{out}}_i = \sum_{j=0}^{i} (\frac{1}{\gamma})^{i-j}\text{in}_j.$$
 
 ```python
 def discounted_cumsum(x: Tensor, dim: int = -1, gamma: float = 2) -> Tensor:
