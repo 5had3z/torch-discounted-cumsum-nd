@@ -72,12 +72,7 @@ TORCH_LIBRARY(discounted_cumsum, m)
     m.def("_discounted_cumsum_bw(Tensor input, int dim, float gamma) -> Tensor");
 }
 
-struct P
-{
-    float i; // index
-    float v; // value
-};
-using WarpScan = cub::WarpScan<P>;
+using WarpScan = cub::WarpScan<float2>;
 using StorageT = typename WarpScan::TempStorage;
 
 template <typename T>
@@ -85,20 +80,20 @@ __global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output
 {
     __shared__ StorageT tempStorage;
 
-    P warp_agg{0, 0};
+    float2 warp_agg{0, 0};
     for (auto idx = threadIdx.x; idx < scanDimSize; idx += gThreadBlockDim)
     {
         float data = static_cast<float>(input[blockIdx.x][idx]);
-        data += (threadIdx.x == 0) * inv_gamma * warp_agg.v;
-        P pair{static_cast<float>(idx), data};
-        auto fn = [&](const P& a, const P& b)
+        data += (threadIdx.x == 0) * inv_gamma * warp_agg.y;
+        float2 pair{static_cast<float>(idx), data};
+        auto fn = [&](const float2& a, const float2& b)
         {
-            float c = powf(inv_gamma, b.i - a.i);
-            return P{b.i, fma(a.v, c, b.v)};
+            float c = __powf(inv_gamma, b.x - a.x);
+            return float2{b.x, __fmaf_rn(a.y, c, b.y)};
         };
-        P result;
+        float2 result;
         WarpScan(tempStorage).InclusiveScan(pair, result, fn, warp_agg);
-        output[blockIdx.x][idx] = static_cast<T>(result.v);
+        output[blockIdx.x][idx] = static_cast<T>(result.y);
         __syncwarp();
     }
 }
@@ -133,20 +128,20 @@ __global__ void backward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> outpu
 {
     __shared__ StorageT tempStorage;
 
-    P warp_agg{0, 0};
+    float2 warp_agg{0, 0};
     for (int idx = scanDimSize - threadIdx.x - 1; idx >= 0; idx -= gThreadBlockDim)
     {
         float data = static_cast<float>(input[blockIdx.x][idx]);
-        data += (threadIdx.x == 0) * inv_gamma * warp_agg.v;
-        P pair{static_cast<float>(idx), data};
-        auto fn = [&](const P& a, const P& b)
+        data += (threadIdx.x == 0) * inv_gamma * warp_agg.y;
+        float2 pair{static_cast<float>(idx), data};
+        auto fn = [&](const float2& a, const float2& b)
         {
-            float c = powf(inv_gamma, a.i - b.i);
-            return P{b.i, fma(a.v, c, b.v)};
+            float c = __powf(inv_gamma, a.x - b.x);
+            return float2{b.x, __fmaf_rn(a.y, c, b.y)};
         };
-        P result;
+        float2 result;
         WarpScan(tempStorage).InclusiveScan(pair, result, fn, warp_agg);
-        output[blockIdx.x][idx] = static_cast<T>(result.v);
+        output[blockIdx.x][idx] = static_cast<T>(result.y);
         __syncwarp();
     }
 }
