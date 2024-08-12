@@ -38,8 +38,10 @@ int main(int argc, char* argv[])
         std::cerr << "Input shape dimensions must be positive and non-zero, got: " << testShape << "\n";
         return -1;
     }
-    auto testData = torch::randn(c10::IntArrayRef(testShape), c10::TensorOptions(c10::Device("cuda:0")));
+    auto opts = c10::TensorOptions().device(c10::Device("cuda:0")).dtype(c10::ScalarType::Float);
+    auto testData = torch::randn(c10::IntArrayRef(testShape), opts);
 
+    torch::cumsum(testData, dim);
     if (parsed_opts.count("backward"))
     {
         backward_cuda(testData, dim, gamma);

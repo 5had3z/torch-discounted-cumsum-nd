@@ -1,4 +1,4 @@
-#include <cub/block/block_scan.cuh>
+#include <cub/warp/warp_scan.cuh>
 
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/script.h>
@@ -9,6 +9,12 @@ template <typename scalar_t>
 using TensorAcc2R = torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits>;
 
 constexpr auto gThreadBlockDim = 32;
+
+template <typename integer>
+constexpr inline integer ceil_div(integer n, integer m)
+{
+    return (n + m - 1) / m;
+}
 
 [[nodiscard]] auto getForwardPermutation(int64_t ndim, int64_t dim) -> std::vector<int64_t>
 {
@@ -76,25 +82,35 @@ using WarpScan = cub::WarpScan<float2>;
 using StorageT = typename WarpScan::TempStorage;
 
 template <typename T>
-__global__ void forward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output, float inv_gamma, int64_t scanDimSize)
+__global__ void forward_kernel(const T* __restrict__ inPtr, int64_t inPitch, T* __restrict__ outPtr, int64_t outPitch,
+    const float inv_gamma, const int64_t scanDimSize, const int64_t totalBatch)
 {
-    __shared__ StorageT tempStorage;
-
-    float2 warp_agg{0, 0};
-    for (auto idx = threadIdx.x; idx < scanDimSize; idx += gThreadBlockDim)
+    extern __shared__ StorageT tempStorage[];
+    auto fn = [inv_gamma](float2 a, float2 b)
     {
-        float data = static_cast<float>(input[blockIdx.x][idx]);
-        data += (threadIdx.x == 0) * inv_gamma * warp_agg.y;
-        float2 pair{static_cast<float>(idx), data};
-        auto fn = [&](const float2& a, const float2& b)
+        const float c = __powf(inv_gamma, b.x - a.x);
+        b.y = __fmaf_rn(a.y, c, b.y);
+        return b;
+    };
+
+    const auto batchOffset = blockIdx.x * blockDim.y + threadIdx.y;
+    const bool hasWork = batchOffset < totalBatch;
+
+    const auto inOffset = inPtr + inPitch * batchOffset;
+    const auto outOffset = outPtr + outPitch * batchOffset;
+
+    float warp_agg{0};
+    for (int idx = threadIdx.x; idx < scanDimSize; idx += gThreadBlockDim)
+    {
+        if (hasWork)
         {
-            float c = __powf(inv_gamma, b.x - a.x);
-            return float2{b.x, __fmaf_rn(a.y, c, b.y)};
-        };
-        float2 result;
-        WarpScan(tempStorage).InclusiveScan(pair, result, fn, warp_agg);
-        output[blockIdx.x][idx] = static_cast<T>(result.y);
-        __syncwarp();
+            float data = static_cast<float>(inOffset[idx]);
+            data += (threadIdx.x == 0) * inv_gamma * warp_agg;
+            float2 result;
+            WarpScan(tempStorage[threadIdx.y]).InclusiveScan(float2{__int2float_rn(idx), data}, result, fn);
+            outOffset[idx] = static_cast<T>(result.y);
+            warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
+        }
     }
 }
 
@@ -107,42 +123,55 @@ auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torc
     torch::Tensor inputFlat = prepareInput(input, dim);
     auto output = torch::zeros_like(inputFlat);
 
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    const dim3 blocksGrid(static_cast<unsigned int>(inputFlat.size(0)));
-    const dim3 threadsPerBlock(gThreadBlockDim);
+    const auto maxBlockSize = at::cuda::getCurrentDeviceProperties()->maxThreadsPerBlock / 2;
+    const auto batchSize = static_cast<int>(inputFlat.size(0));
+    const int yBlockDim = std::min(maxBlockSize / gThreadBlockDim, batchSize);
+    const dim3 blocksGrid(ceil_div(batchSize, yBlockDim));
+    const dim3 threadsPerBlock(gThreadBlockDim, yBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cuda",
         [&]()
         {
-            auto inputAcc = inputFlat.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
-            auto outputAcc = output.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
-            forward_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, 0, stream>>>(inputAcc, outputAcc, 1.f / gamma, inputFlat.size(1));
+            // smem = yBlockDim since sizeof(StorageT) = 1
+            forward_kernel<scalar_t><<<blocksGrid, threadsPerBlock, yBlockDim, at::cuda::getCurrentCUDAStream()>>>(
+                inputFlat.const_data_ptr<scalar_t>(), inputFlat.stride(0), output.mutable_data_ptr<scalar_t>(),
+                output.stride(0), 1.f / gamma, inputFlat.size(1), inputFlat.size(0));
         });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     restoreOutputShape(output, input.sizes(), dim);
     return output;
 }
 
 template <typename T>
-__global__ void backward_kernel(const TensorAcc2R<T> input, TensorAcc2R<T> output, float inv_gamma, int64_t scanDimSize)
+__global__ void backward_kernel(const T* __restrict__ inPtr, int64_t inPitch, T* __restrict__ outPtr, int64_t outPitch,
+    const float inv_gamma, const int64_t scanDimSize, const int64_t totalBatch)
 {
-    __shared__ StorageT tempStorage;
+    extern __shared__ StorageT tempStorage[];
+    auto fn = [inv_gamma](float2 a, float2 b)
+    {
+        const float c = __powf(inv_gamma, a.x - b.x);
+        b.y = __fmaf_rn(a.y, c, b.y);
+        return b;
+    };
 
-    float2 warp_agg{0, 0};
+    const auto batchOffset = blockIdx.x * blockDim.y + threadIdx.y;
+    const bool hasWork = batchOffset < totalBatch;
+
+    const auto inOffset = inPtr + inPitch * batchOffset;
+    const auto outOffset = outPtr + outPitch * batchOffset;
+
+    float warp_agg{0};
     for (int idx = scanDimSize - threadIdx.x - 1; idx >= 0; idx -= gThreadBlockDim)
     {
-        float data = static_cast<float>(input[blockIdx.x][idx]);
-        data += (threadIdx.x == 0) * inv_gamma * warp_agg.y;
-        float2 pair{static_cast<float>(idx), data};
-        auto fn = [&](const float2& a, const float2& b)
+        if (hasWork)
         {
-            float c = __powf(inv_gamma, a.x - b.x);
-            return float2{b.x, __fmaf_rn(a.y, c, b.y)};
-        };
-        float2 result;
-        WarpScan(tempStorage).InclusiveScan(pair, result, fn, warp_agg);
-        output[blockIdx.x][idx] = static_cast<T>(result.y);
-        __syncwarp();
+            float data = static_cast<float>(inOffset[idx]);
+            data += (threadIdx.x == 0) * inv_gamma * warp_agg;
+            float2 result;
+            WarpScan(tempStorage[threadIdx.y]).InclusiveScan({__int2float_rn(idx), data}, result, fn);
+            outOffset[idx] = static_cast<T>(result.y);
+            warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
+        }
     }
 }
 
@@ -155,17 +184,20 @@ auto backward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> tor
     torch::Tensor inputFlat = prepareInput(input, dim);
     auto output = torch::zeros_like(inputFlat);
 
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    const dim3 blocksGrid(static_cast<unsigned int>(inputFlat.size(0)));
-    const dim3 threadsPerBlock(gThreadBlockDim);
+    const auto maxBlockSize = at::cuda::getCurrentDeviceProperties()->maxThreadsPerBlock / 2;
+    const auto batchSize = static_cast<int>(inputFlat.size(0));
+    const int yBlockDim = std::min(maxBlockSize / gThreadBlockDim, batchSize);
+    const dim3 blocksGrid(ceil_div(batchSize, yBlockDim));
+    const dim3 threadsPerBlock(gThreadBlockDim, yBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cuda",
         [&]()
         {
-            auto inputAcc = inputFlat.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
-            auto outputAcc = output.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>();
-            backward_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, 0, stream>>>(inputAcc, outputAcc, 1.f / gamma, inputFlat.size(1));
+            // smem = yBlockDim since sizeof(StorageT) = 1
+            backward_kernel<scalar_t><<<blocksGrid, threadsPerBlock, yBlockDim, at::cuda::getCurrentCUDAStream()>>>(
+                inputFlat.const_data_ptr<scalar_t>(), inputFlat.stride(0), output.mutable_data_ptr<scalar_t>(),
+                output.stride(0), 1.f / gamma, inputFlat.size(1), inputFlat.size(0));
         });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     restoreOutputShape(output, input.sizes(), dim);
     return output;
