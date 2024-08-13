@@ -24,8 +24,6 @@ find_package(Torch REQUIRED HINTS "${TORCH_PATH}/share/cmake/Torch")
 
 find_package(TBB REQUIRED)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-
 add_executable(discount-cumsum-profile operator.cu profile.cpp)
 
 target_compile_options(
