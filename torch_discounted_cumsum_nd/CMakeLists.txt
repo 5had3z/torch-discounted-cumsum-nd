@@ -15,10 +15,12 @@ cpmaddpackage(
   "CXXOPTS_BUILD_EXAMPLES NO"
   "CXXOPTS_BUILD_TESTS NO")
 
-# Query python as to where PyTorch is located
-execute_process(COMMAND python3 -c "import torch; print(torch.__path__[0])"
-                OUTPUT_VARIABLE TORCH_PATH)
-string(STRIP ${TORCH_PATH} TORCH_PATH)
+if (NOT TORCH_PATH)
+  # Query python as to where PyTorch is located if not already defined
+  execute_process(COMMAND python3 -c "import torch; print(torch.__path__[0])"
+                  OUTPUT_VARIABLE TORCH_PATH)
+  string(STRIP ${TORCH_PATH} TORCH_PATH)
+endif()
 
 find_package(Torch REQUIRED HINTS "${TORCH_PATH}/share/cmake/Torch")
 

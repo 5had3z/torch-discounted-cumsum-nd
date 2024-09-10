@@ -54,4 +54,4 @@ def discounted_cumsum(x: Tensor, dim: int = -1, gamma: float = 2) -> Tensor:
 
 To validate correctness of the inclusive-scan operation over multiple shapes and dimensions, the program is checked against a normal cumsum with gamma=1. To validate the gamma weighting is producing the correct result, the CUDA implementation is checked against the simpler CPU implementation.
 
-There is a CMakeLists that builds a standalone CUDA/C++ program to perform a simple profile on the operation with Nsight-Compute. This will inform how tweaks to the kernel impact performance and hopefully improve performance closer to memcpy speed.
+There is a CMakeLists.txt that builds a standalone CUDA/C++ program to perform a simple profile on the operation with Nsight-Compute. This will inform how tweaks to the kernel impact performance and hopefully improve performance closer to memcpy speed. If PyTorch can't be found automatically by default os interpreter, like if its in some venv, you can manually set `-DTORCH_PATH:STRING=/path/to/venv/lib/python3.12/site-packages/torch`
