@@ -26,7 +26,7 @@ find_package(Torch REQUIRED HINTS "${TORCH_PATH}/share/cmake/Torch")
 
 find_package(TBB REQUIRED)
 
-add_executable(discount-cumsum-profile operator.cu profile.cpp)
+add_executable(discount-cumsum-profile operator.cpp contiguous.cu non_contiguous.cu profile.cpp)
 
 target_compile_options(
   discount-cumsum-profile
