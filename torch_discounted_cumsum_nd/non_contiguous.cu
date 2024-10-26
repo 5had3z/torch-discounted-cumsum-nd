@@ -31,24 +31,28 @@ __global__ void forward_noncontig_kernel(const TensorAcc3R<T> input, TensorAcc3R
     };
 
     const auto tblock = cg::this_thread_block();
+    const auto input_ = input[blockIdx.x];
+    auto output_ = output[blockIdx.x];
 
     for (int outerDim = threadIdx.y; outerDim < input.size(2); outerDim += gThreadBlockDim)
     {
-        float warp_agg{0};
+        float warpAgg{0};
         for (int scanDim = threadIdx.x; scanDim < input.size(1); scanDim += gThreadBlockDim)
         {
-            blockTemp[threadIdx.y][threadIdx.x] = input[blockIdx.x][scanDim][outerDim];
+            blockTemp[threadIdx.y][threadIdx.x] = input_[scanDim][outerDim];
             tblock.sync();
 
-            float data = blockTemp[threadIdx.x][threadIdx.y];
+            float2 data = {
+                .x = __int2float_rn(scanDim), .y = __fmaf_rn(invGamma, warpAgg, blockTemp[threadIdx.x][threadIdx.y])};
+
             float2 result;
             WarpScan(reinterpret_cast<WarpScan::TempStorage(&)[gThreadBlockDim]>(smem)[threadIdx.y])
-                .InclusiveScan(float2{__int2float_rn(scanDim), data}, result, fn);
+                .InclusiveScan(data, result, fn);
             blockTemp[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
             tblock.sync();
 
-            output[blockIdx.x][scanDim][outerDim] = blockTemp[threadIdx.y][threadIdx.x];
-            warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
+            output_[scanDim][outerDim] = blockTemp[threadIdx.y][threadIdx.x];
+            warpAgg = (threadIdx.x == 0) * __shfl_sync(0xFFFFFFFF, result.y, 31);
         }
     }
 }
@@ -60,7 +64,6 @@ void forward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Ten
     TORCH_CHECK_EQ(output.ndimension(), 3);
     TORCH_CHECK_EQ(output.is_contiguous(), true);
 
-    const auto maxBlockSize = at::cuda::getCurrentDeviceProperties()->maxThreadsPerBlock;
     const dim3 blocksGrid(input.size(0));
     const dim3 threadsPerBlock(gThreadBlockDim, gThreadBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cuda",

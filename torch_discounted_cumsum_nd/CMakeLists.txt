@@ -15,7 +15,7 @@ cpmaddpackage(
   "CXXOPTS_BUILD_EXAMPLES NO"
   "CXXOPTS_BUILD_TESTS NO")
 
-if (NOT TORCH_PATH)
+if(NOT TORCH_PATH)
   # Query python as to where PyTorch is located if not already defined
   execute_process(COMMAND python3 -c "import torch; print(torch.__path__[0])"
                   OUTPUT_VARIABLE TORCH_PATH)
@@ -26,13 +26,13 @@ find_package(Torch REQUIRED HINTS "${TORCH_PATH}/share/cmake/Torch")
 
 find_package(TBB REQUIRED)
 
-add_executable(discount-cumsum-profile operator.cpp contiguous.cu non_contiguous.cu profile.cpp)
+add_executable(discount-cumsum-profile operator.cpp contiguous.cu
+                                       non_contiguous.cu profile.cpp)
 
 target_compile_options(
   discount-cumsum-profile
-  PUBLIC $<$<CONFIG:Debug>:-O0;-g;$<$<COMPILE_LANGUAGE:CUDA>:-G;>>
-         $<$<CONFIG:RelWithDebInfo>:-g;-O2;$<$<COMPILE_LANGUAGE:CUDA>:-G;>>
-         $<$<CONFIG:Release>:-O2;>)
+  PUBLIC $<$<CONFIG:Debug>:$<$<COMPILE_LANGUAGE:CUDA>:-G;>>
+         $<$<CONFIG:RelWithDebInfo>:$<$<COMPILE_LANGUAGE:CUDA>:-G;>>)
 
 set_target_properties(discount-cumsum-profile PROPERTIES CUDA_ARCHITECTURES
                                                          "native")

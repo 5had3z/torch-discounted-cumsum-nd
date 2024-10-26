@@ -11,6 +11,13 @@ void backward_cuda_contig(const torch::Tensor& inputFlat, double gamma, torch::T
 
 void backward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Tensor& output);
 
+/**
+ * @brief Get the permutation to make `dim` last for shape of `ndims`.
+ *
+ * @param ndim Number of dimensions.
+ * @param dim Dimension index to permute to the end.
+ * @return Permutation to make dim last.
+ */
 [[nodiscard]] auto getForwardPermutation(int64_t ndim, int64_t dim) -> std::vector<int64_t>
 {
     std::vector<int64_t> dims;
@@ -26,6 +33,13 @@ void backward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Te
     return dims;
 }
 
+/**
+ * @brief Get the permutation required to reverse making `dim` last for shape of `ndims`.
+ *
+ * @param ndim Number of dimensions.
+ * @param dim Original dimension that was permuted to last.
+ * @return Permutation to restore original shape.
+ */
 [[nodiscard]] auto getReversePermutation(int64_t ndim, int64_t dim) -> std::vector<int64_t>
 {
     // Allocate target size then remove last element by resizing
@@ -36,7 +50,14 @@ void backward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Te
     return dims;
 }
 
-[[nodiscard]] auto prepareInput(const torch::Tensor& input, int64_t dim) -> torch::Tensor
+/**
+ * @brief Permutes dim to be the last and flattens other dimensions. Also enforces the output to be contiguous.
+ *
+ * @param input Tensor to permute
+ * @param dim Dimension to permute to the end.
+ * @return Contiguous two dimension tensor where dim is now last.
+ */
+[[nodiscard]] auto permuteDimToLast(const torch::Tensor& input, int64_t dim) -> torch::Tensor
 {
     torch::Tensor input_ = input;
     if (dim != (input.ndimension() - 1))
@@ -46,6 +67,13 @@ void backward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Te
     return input_.flatten(0, -2).contiguous();
 }
 
+/**
+ * @brief Permute dim of inShape to be last.
+ *
+ * @param inShape Shape to permute
+ * @param dim Dimension to permute last
+ * @return Permuted shape.
+ */
 [[nodiscard]] auto getPermutedShape(c10::IntArrayRef inShape, int64_t dim) -> std::vector<int64_t>
 {
     std::vector permShape(inShape.begin(), inShape.end());
@@ -57,6 +85,13 @@ void backward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Te
     return permShape;
 }
 
+/**
+ * @brief Restore output to the original inShape where dim of inShape was permuted last.
+ *
+ * @param output Tensor to restore (modified inplace).
+ * @param inShape Original shape to restore.
+ * @param dim Dimension that was permuted to last.
+ */
 void restoreOutputShape(torch::Tensor& output, c10::IntArrayRef inShape, int64_t dim)
 {
     output = output.reshape(getPermutedShape(inShape, dim));
@@ -73,28 +108,54 @@ TORCH_LIBRARY(discounted_cumsum, m)
     m.def("_discounted_cumsum_bw(Tensor input, int dim, float gamma) -> Tensor");
 }
 
+/**
+ * @brief Performs weighted inclusive-scan on input over dim with gamma.
+ *
+ * @param input data to scan
+ * @param dim dimension to scan over
+ * @param gamma decay rate of scan
+ * @return Tensor weighted sum of input over dim
+ */
 auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
     if (dim < 0) // wrap to [0,ndim]
     {
         dim += input.ndimension();
     }
-    torch::Tensor inputFlat = prepareInput(input, dim);
-    auto output = torch::zeros_like(inputFlat);
+    auto output = torch::empty_like(input);
 
-    forward_cuda_contig(inputFlat, gamma, output);
+    if (dim == (input.ndimension() - 1))
+    {
+        torch::Tensor inputFlat = input.flatten(0, -2).contiguous();
+        output = output.reshape_as(inputFlat);
+        forward_cuda_contig(inputFlat, gamma, output);
+    }
+    else
+    {
+        torch::Tensor inputFlat = input.flatten(0, dim - 1).flatten(2, -1).contiguous();
+        output = output.reshape_as(inputFlat);
+        forward_cuda_noncontig(inputFlat, gamma, output);
+    }
 
-    restoreOutputShape(output, input.sizes(), dim);
+    output = output.reshape_as(input);
     return output;
 }
 
+/**
+ * @brief Calculates gradient for inputs of weighted scan.
+ *
+ * @param input gradient of output
+ * @param dim dimension to scan over
+ * @param gamma decay rate of scan
+ * @return Tensor gradient of input
+ */
 auto backward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
     if (dim < 0) // wrap to [0,ndim]
     {
         dim += input.ndimension();
     }
-    torch::Tensor inputFlat = prepareInput(input, dim);
+    torch::Tensor inputFlat = permuteDimToLast(input, dim);
     auto output = torch::zeros_like(inputFlat);
 
     backward_cuda_contig(inputFlat, gamma, output);
@@ -109,13 +170,21 @@ TORCH_LIBRARY_IMPL(discounted_cumsum, CUDA, m)
     m.impl("_discounted_cumsum_bw", &backward_cuda);
 }
 
+/**
+ * @brief Performs weighted inclusive-scan on input over dim with gamma.
+ *
+ * @param input data to scan
+ * @param dim dimension to scan over
+ * @param gamma decay rate of scan
+ * @return Tensor result
+ */
 auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
     if (dim < 0) // wrap to [0,ndim]
     {
         dim += input.ndimension();
     }
-    torch::Tensor inputFlat = prepareInput(input, dim);
+    torch::Tensor inputFlat = permuteDimToLast(input, dim);
     auto output = torch::zeros_like(inputFlat);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cpu",
@@ -135,13 +204,21 @@ auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch
     return output;
 }
 
+/**
+ * @brief Calculates gradient for inputs of weighted scan.
+ *
+ * @param input gradient of output
+ * @param dim dimension to scan over
+ * @param gamma decay rate of scan
+ * @return Tensor gradient of input
+ */
 auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
     if (dim < 0) // wrap to [0,ndim]
     {
         dim += input.ndimension();
     }
-    torch::Tensor inputFlat = prepareInput(input, dim);
+    torch::Tensor inputFlat = permuteDimToLast(input, dim);
     auto output = torch::zeros_like(inputFlat);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cpu",
