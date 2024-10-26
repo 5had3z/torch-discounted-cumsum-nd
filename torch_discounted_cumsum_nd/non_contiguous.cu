@@ -1,58 +1,76 @@
 #include "common.cuh"
 
-#include <cub/block/block_load.cuh>
+#include "cooperative_groups.h"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/script.h>
 
+template <typename scalar_t>
+using TensorAcc3R = torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits>;
+
+namespace cg = cooperative_groups;
+
 template <typename T>
-__global__ void forward_noncontig_kernel(const T* __restrict__ inPtr, const int64_t inOuterPitch,
-    const int64_t inInnerPitch, T* __restrict__ outPtr, const int64_t outOuterPitch, int64_t outInnerPitch,
-    const float inv_gamma, const int64_t scanDimSize, const int64_t outerBatch)
+union ShMemLayout
 {
-    using BlockExchange = cub::BlockExchange<float, 32, 1, false, 32>;
-    using BlockTemp = typename BlockExchange::TempStorage;
+    WarpScan::TempStorage scan[gThreadBlockDim];
+    T tpose[gThreadBlockDim][gThreadBlockDim];
+};
 
-    union ShMemLayout
+template <typename T>
+__global__ void forward_noncontig_kernel(const TensorAcc3R<T> input, TensorAcc3R<T> output, const float invGamma)
+{
+    extern __shared__ __align__(alignof(ShMemLayout<T>)) char smem[];
+    auto& blockTemp = reinterpret_cast<float(&)[gThreadBlockDim][gThreadBlockDim]>(smem);
+
+    auto fn = [invGamma](float2 a, float2 b)
     {
-        WarpScan::TempStorage warp;
-        BlockTemp block;
-    };
-
-    extern __shared__ __align__(alignof(ShMemLayout)) char smem[];
-    auto& blockTemp = reinterpret_cast<BlockTemp&>(smem);
-
-    auto fn = [inv_gamma](float2 a, float2 b)
-    {
-        const float c = __powf(inv_gamma, b.x - a.x);
+        const float c = __powf(invGamma, b.x - a.x);
         b.y = __fmaf_rn(a.y, c, b.y);
         return b;
     };
 
-    float data[1];
-    data[0] = static_cast<float>(*inPtr);
-    BlockExchange(blockTemp).WarpStripedToBlocked(data);
+    const auto tblock = cg::this_thread_block();
+
+    for (int outerDim = threadIdx.y; outerDim < input.size(2); outerDim += gThreadBlockDim)
+    {
+        float warp_agg{0};
+        for (int scanDim = threadIdx.x; scanDim < input.size(1); scanDim += gThreadBlockDim)
+        {
+            blockTemp[threadIdx.y][threadIdx.x] = input[blockIdx.x][scanDim][outerDim];
+            tblock.sync();
+
+            float data = blockTemp[threadIdx.x][threadIdx.y];
+            float2 result;
+            WarpScan(reinterpret_cast<WarpScan::TempStorage(&)[gThreadBlockDim]>(smem)[threadIdx.y])
+                .InclusiveScan(float2{__int2float_rn(scanDim), data}, result, fn);
+            blockTemp[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
+            tblock.sync();
+
+            output[blockIdx.x][scanDim][outerDim] = blockTemp[threadIdx.y][threadIdx.x];
+            warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
+        }
+    }
 }
 
 void forward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Tensor& output)
 {
     TORCH_CHECK_EQ(input.ndimension(), 3);
+    TORCH_CHECK_EQ(input.is_contiguous(), true);
     TORCH_CHECK_EQ(output.ndimension(), 3);
+    TORCH_CHECK_EQ(output.is_contiguous(), true);
 
     const auto maxBlockSize = at::cuda::getCurrentDeviceProperties()->maxThreadsPerBlock;
-    const auto batchSize = static_cast<int>(input.size(0));
-    const int yBlockDim = std::min(maxBlockSize / gThreadBlockDim, batchSize);
-    const dim3 blocksGrid(ceil_div(batchSize, yBlockDim));
-    const dim3 threadsPerBlock(gThreadBlockDim, yBlockDim);
+    const dim3 blocksGrid(input.size(0));
+    const dim3 threadsPerBlock(gThreadBlockDim, gThreadBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cuda",
         [&]()
         {
-            // smem = yBlockDim since sizeof(StorageT) = 1
+            auto inputAcc = input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>();
+            auto outputAcc = output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>();
             forward_noncontig_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, yBlockDim, at::cuda::getCurrentCUDAStream()>>>(
-                    input.const_data_ptr<scalar_t>(), input.stride(0), input.stride(1),
-                    output.mutable_data_ptr<scalar_t>(), output.stride(0), output.stride(1), 1.f / gamma, input.size(1),
-                    input.size(0));
+                <<<blocksGrid, threadsPerBlock, sizeof(ShMemLayout<scalar_t>), at::cuda::getCurrentCUDAStream()>>>(
+                    inputAcc, outputAcc, 1.f / gamma);
         });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

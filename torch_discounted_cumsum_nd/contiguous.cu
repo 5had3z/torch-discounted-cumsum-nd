@@ -5,18 +5,21 @@
 
 template <typename T>
 __global__ void forward_contiguous_kernel(const T* __restrict__ inPtr, int64_t inPitch, T* __restrict__ outPtr,
-    int64_t outPitch, const float inv_gamma, const int64_t scanDimSize, const int64_t totalBatch)
+    int64_t outPitch, const float invGamma, const int64_t scanDimSize, const int64_t totalBatch)
 {
     extern __shared__ WarpScan::TempStorage tempStorage[];
-    auto fn = [inv_gamma](float2 a, float2 b)
+    auto fn = [invGamma](float2 a, float2 b)
     {
-        const float c = __powf(inv_gamma, b.x - a.x);
+        const float c = __powf(invGamma, b.x - a.x);
         b.y = __fmaf_rn(a.y, c, b.y);
         return b;
     };
 
     const auto batchOffset = blockIdx.x * blockDim.y + threadIdx.y;
-    const bool hasWork = batchOffset < totalBatch;
+    if (batchOffset >= totalBatch)
+    {
+        return;
+    }
 
     const auto inOffset = inPtr + inPitch * batchOffset;
     const auto outOffset = outPtr + outPitch * batchOffset;
@@ -24,15 +27,12 @@ __global__ void forward_contiguous_kernel(const T* __restrict__ inPtr, int64_t i
     float warp_agg{0};
     for (int idx = threadIdx.x; idx < scanDimSize; idx += gThreadBlockDim)
     {
-        if (hasWork)
-        {
-            float data = static_cast<float>(inOffset[idx]);
-            data += (threadIdx.x == 0) * inv_gamma * warp_agg;
-            float2 result;
-            WarpScan(tempStorage[threadIdx.y]).InclusiveScan(float2{__int2float_rn(idx), data}, result, fn);
-            outOffset[idx] = static_cast<T>(result.y);
-            warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
-        }
+        float data = static_cast<float>(inOffset[idx]);
+        data = __fmaf_rn((threadIdx.x == 0) * invGamma, warp_agg, data);
+        float2 result;
+        WarpScan(tempStorage[threadIdx.y]).InclusiveScan(float2{__int2float_rn(idx), data}, result, fn);
+        outOffset[idx] = static_cast<T>(result.y);
+        warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
     }
 }
 
@@ -57,18 +57,21 @@ void forward_cuda_contig(const torch::Tensor& inputFlat, double gamma, torch::Te
 
 template <typename T>
 __global__ void backward_contiguous_kernel(const T* __restrict__ inPtr, int64_t inPitch, T* __restrict__ outPtr,
-    int64_t outPitch, const float inv_gamma, const int64_t scanDimSize, const int64_t totalBatch)
+    int64_t outPitch, const float invGamma, const int64_t scanDimSize, const int64_t totalBatch)
 {
     extern __shared__ WarpScan::TempStorage tempStorage[];
-    auto fn = [inv_gamma](float2 a, float2 b)
+    auto fn = [invGamma](float2 a, float2 b)
     {
-        const float c = __powf(inv_gamma, a.x - b.x);
+        const float c = __powf(invGamma, a.x - b.x);
         b.y = __fmaf_rn(a.y, c, b.y);
         return b;
     };
 
     const auto batchOffset = blockIdx.x * blockDim.y + threadIdx.y;
-    const bool hasWork = batchOffset < totalBatch;
+    if (batchOffset >= totalBatch)
+    {
+        return;
+    }
 
     const auto inOffset = inPtr + inPitch * batchOffset;
     const auto outOffset = outPtr + outPitch * batchOffset;
@@ -76,15 +79,12 @@ __global__ void backward_contiguous_kernel(const T* __restrict__ inPtr, int64_t 
     float warp_agg{0};
     for (int idx = scanDimSize - threadIdx.x - 1; idx >= 0; idx -= gThreadBlockDim)
     {
-        if (hasWork)
-        {
-            float data = static_cast<float>(inOffset[idx]);
-            data += (threadIdx.x == 0) * inv_gamma * warp_agg;
-            float2 result;
-            WarpScan(tempStorage[threadIdx.y]).InclusiveScan({__int2float_rn(idx), data}, result, fn);
-            outOffset[idx] = static_cast<T>(result.y);
-            warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
-        }
+        float data = static_cast<float>(inOffset[idx]);
+        data = __fmaf_rn((threadIdx.x == 0) * invGamma, warp_agg, data);
+        float2 result;
+        WarpScan(tempStorage[threadIdx.y]).InclusiveScan({__int2float_rn(idx), data}, result, fn);
+        outOffset[idx] = static_cast<T>(result.y);
+        warp_agg = __shfl_sync(0xFFFFFFFF, result.y, 31);
     }
 }
 
