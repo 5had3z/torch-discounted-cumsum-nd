@@ -118,6 +118,7 @@ TORCH_LIBRARY(discounted_cumsum, m)
  */
 auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
+    TORCH_CHECK(input.is_contiguous());
     if (dim < 0) // wrap to [0,ndim]
     {
         dim += input.ndimension();
@@ -126,13 +127,14 @@ auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torc
 
     if (dim == (input.ndimension() - 1))
     {
-        torch::Tensor inputFlat = input.flatten(0, -2).contiguous();
+        torch::Tensor inputFlat = input.flatten(0, -2);
         output = output.reshape_as(inputFlat);
         forward_cuda_contig(inputFlat, gamma, output);
     }
     else
     {
-        torch::Tensor inputFlat = input.flatten(0, dim - 1).flatten(2, -1).contiguous();
+        torch::Tensor inputFlat = dim == 0 ? input.unsqueeze(0) : input.flatten(0, dim - 1);
+        inputFlat = inputFlat.flatten(2, -1);
         output = output.reshape_as(inputFlat);
         forward_cuda_noncontig(inputFlat, gamma, output);
     }

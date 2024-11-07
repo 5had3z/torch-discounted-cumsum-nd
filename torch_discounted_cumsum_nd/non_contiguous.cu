@@ -18,10 +18,10 @@ union ShMemLayout
 };
 
 template <typename T>
-__global__ void forward_noncontig_kernel(const TensorAcc3R<T> input, TensorAcc3R<T> output, const float invGamma)
+__global__ void __launch_bounds__(gThreadBlockDim* gThreadBlockDim)
+    forward_noncontig_kernel(const TensorAcc3R<T> input, TensorAcc3R<T> output, const float invGamma)
 {
-    extern __shared__ __align__(alignof(ShMemLayout<T>)) char smem[];
-    auto& blockTemp = reinterpret_cast<float(&)[gThreadBlockDim][gThreadBlockDim]>(smem);
+    __shared__ ShMemLayout<T> smem;
 
     auto fn = [invGamma](float2 a, float2 b)
     {
@@ -34,24 +34,35 @@ __global__ void forward_noncontig_kernel(const TensorAcc3R<T> input, TensorAcc3R
     const auto input_ = input[blockIdx.x];
     auto output_ = output[blockIdx.x];
 
-    for (int outerDim = threadIdx.y; outerDim < input.size(2); outerDim += gThreadBlockDim)
+    const int outerEnd = ceil_div(input.size(2), gThreadBlockDim) * gThreadBlockDim;
+    const int scanEnd = ceil_div(input.size(1), gThreadBlockDim) * gThreadBlockDim;
+
+    for (int outerDim = threadIdx.x; outerDim < outerEnd; outerDim += gThreadBlockDim)
     {
         float warpAgg{0};
-        for (int scanDim = threadIdx.x; scanDim < input.size(1); scanDim += gThreadBlockDim)
+        for (int scanDim = threadIdx.y; scanDim < scanEnd; scanDim += gThreadBlockDim)
         {
-            blockTemp[threadIdx.y][threadIdx.x] = input_[scanDim][outerDim];
+            T sample = 0;
+            const bool isValid = outerDim < input.size(2) && scanDim < input.size(1);
+            if (isValid)
+            {
+                sample = input_[scanDim][outerDim];
+            }
+            smem.tpose[threadIdx.y][threadIdx.x] = sample;
             tblock.sync();
 
             float2 data = {
-                .x = __int2float_rn(scanDim), .y = __fmaf_rn(invGamma, warpAgg, blockTemp[threadIdx.x][threadIdx.y])};
+                .x = __int2float_rn(scanDim), .y = __fmaf_rn(invGamma, warpAgg, smem.tpose[threadIdx.x][threadIdx.y])};
 
             float2 result;
-            WarpScan(reinterpret_cast<WarpScan::TempStorage(&)[gThreadBlockDim]>(smem)[threadIdx.y])
-                .InclusiveScan(data, result, fn);
-            blockTemp[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
+            WarpScan(smem.scan[threadIdx.y]).InclusiveScan(data, result, fn);
+            smem.tpose[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
             tblock.sync();
 
-            output_[scanDim][outerDim] = blockTemp[threadIdx.y][threadIdx.x];
+            if (isValid)
+            {
+                output_[scanDim][outerDim] = smem.tpose[threadIdx.y][threadIdx.x];
+            }
             warpAgg = (threadIdx.x == 0) * __shfl_sync(0xFFFFFFFF, result.y, 31);
         }
     }
@@ -71,9 +82,8 @@ void forward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Ten
         {
             auto inputAcc = input.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>();
             auto outputAcc = output.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>();
-            forward_noncontig_kernel<scalar_t>
-                <<<blocksGrid, threadsPerBlock, sizeof(ShMemLayout<scalar_t>), at::cuda::getCurrentCUDAStream()>>>(
-                    inputAcc, outputAcc, 1.f / gamma);
+            forward_noncontig_kernel<scalar_t><<<blocksGrid, threadsPerBlock, 0, at::cuda::getCurrentCUDAStream()>>>(
+                inputAcc, outputAcc, 1.f / gamma);
         });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

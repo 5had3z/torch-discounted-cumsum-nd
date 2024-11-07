@@ -41,14 +41,23 @@ int main(int argc, char* argv[])
     auto opts = c10::TensorOptions().device(c10::Device("cuda:0")).dtype(c10::ScalarType::Float);
     auto testData = torch::randn(c10::IntArrayRef(testShape), opts);
 
-    torch::cumsum(testData, dim);
+    torch::Tensor baseResult = torch::cumsum(testData, dim);
+    torch::Tensor customResult;
     if (parsed_opts.count("backward"))
     {
         backward_cuda(testData, dim, gamma);
     }
     else
     {
-        forward_cuda(testData, dim, gamma);
+        customResult = forward_cuda(testData, dim, gamma);
+    }
+
+    if (customResult.numel() > 0 && gamma == 1.0)
+    {
+        if (!torch::allclose(baseResult, customResult))
+        {
+            std::cerr << "Got unequal results beteen baseline and custom kernel\n";
+        }
     }
 
     return 0;

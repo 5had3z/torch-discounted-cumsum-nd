@@ -20,13 +20,13 @@ def make_data(shape: Sequence[int], device: str):
 
 
 _TEST_DEVICES = ["cpu", "cuda"]
-_TEST_SHAPES = [(4, 32), (12, 128, 30), (4, 32, 64), (4, 128, 99)]
+_TEST_SHAPES = [(4, 32), (12, 128, 30), (4, 32, 64), (4, 101, 99)]
 
 
 @pytest.mark.parametrize("dim", [0, -1])
 @pytest.mark.parametrize("device", _TEST_DEVICES)
 @pytest.mark.parametrize("shape", _TEST_SHAPES)
-def test_no_weighting_last_dim(dim: int, device: str, shape: tuple[int, ...]):
+def test_forward_no_weighting(dim: int, device: str, shape: tuple[int, ...]):
     """Test forward method is correct compared against torch.cumsum with gamma=1"""
     data = make_data(shape, device)
     baseline = torch.cumsum(data, dim=dim)
