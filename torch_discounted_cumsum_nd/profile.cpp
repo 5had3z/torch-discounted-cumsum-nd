@@ -8,6 +8,10 @@ auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torc
 
 auto backward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor;
 
+[[nodiscard]] auto permuteDimToLast(const torch::Tensor& input, int64_t dim) -> torch::Tensor;
+
+void restoreOutputShape(torch::Tensor& output, c10::IntArrayRef inShape, int64_t dim);
+
 int main(int argc, char* argv[])
 {
     cxxopts::Options options("Profile-Discounted-Cumsum",
@@ -41,14 +45,26 @@ int main(int argc, char* argv[])
     auto opts = c10::TensorOptions().device(c10::Device("cuda:0")).dtype(c10::ScalarType::Float);
     auto testData = torch::randn(c10::IntArrayRef(testShape), opts);
 
-    torch::cumsum(testData, dim);
+    auto tposefw = permuteDimToLast(testData, dim);
+    restoreOutputShape(tposefw, testData.sizes(), dim);
+
+    torch::Tensor baseResult = torch::cumsum(testData, dim);
+    torch::Tensor customResult;
     if (parsed_opts.count("backward"))
     {
         backward_cuda(testData, dim, gamma);
     }
     else
     {
-        forward_cuda(testData, dim, gamma);
+        customResult = forward_cuda(testData, dim, gamma);
+    }
+
+    if (customResult.numel() > 0 && gamma == 1.0)
+    {
+        if (!torch::allclose(baseResult, customResult))
+        {
+            std::cerr << "Got unequal results beteen baseline and custom kernel\n";
+        }
     }
 
     return 0;

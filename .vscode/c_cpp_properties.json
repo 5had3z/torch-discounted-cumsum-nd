@@ -4,14 +4,15 @@
             "name": "Linux",
             "includePath": [
                 "/usr/local/cuda/include",
-                "${userHome}/.local/lib/python3.10/site-packages/torch/include",
-                "${userHome}/.local/lib/python3.10/site-packages/torch/include/torch/csrc/api/include"
+                "${userHome}/.venv/lib/python3.12/site-packages/torch/include",
+                "${userHome}/.venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
             "cStandard": "c17",
             "cppStandard": "c++17",
-            "intelliSenseMode": "linux-gcc-x64"
+            "intelliSenseMode": "linux-gcc-x64",
+            "configurationProvider": "ms-vscode.cmake-tools"
         }
     ],
     "version": 4
