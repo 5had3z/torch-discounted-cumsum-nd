@@ -14,7 +14,7 @@ template <typename T>
 union ShMemLayout
 {
     WarpScan::TempStorage scan[gThreadBlockDim];
-    T tpose[gThreadBlockDim][gThreadBlockDim];
+    T tpose[gThreadBlockDim][gThreadBlockDim + 1];
 };
 
 template <typename T>
@@ -34,37 +34,34 @@ __global__ void __launch_bounds__(gThreadBlockDim* gThreadBlockDim)
     const auto input_ = input[blockIdx.x];
     auto output_ = output[blockIdx.x];
 
-    const int outerEnd = ceil_div(input.size(2), gThreadBlockDim) * gThreadBlockDim;
+    const int outerDim = blockIdx.y * gThreadBlockDim + threadIdx.x;
     const int scanEnd = ceil_div(input.size(1), gThreadBlockDim) * gThreadBlockDim;
 
-    for (int outerDim = threadIdx.x; outerDim < outerEnd; outerDim += gThreadBlockDim)
+    float warpAgg{0};
+    for (int scanDim = threadIdx.y; scanDim < scanEnd; scanDim += gThreadBlockDim)
     {
-        float warpAgg{0};
-        for (int scanDim = threadIdx.y; scanDim < scanEnd; scanDim += gThreadBlockDim)
+        T sample = 0;
+        const bool isValid = outerDim < input.size(2) && scanDim < input.size(1);
+        if (isValid)
         {
-            T sample = 0;
-            const bool isValid = outerDim < input.size(2) && scanDim < input.size(1);
-            if (isValid)
-            {
-                sample = input_[scanDim][outerDim];
-            }
-            smem.tpose[threadIdx.y][threadIdx.x] = sample;
-            tblock.sync();
-
-            float2 data = {.x = __int2float_rn(threadIdx.x),
-                .y = __fmaf_rn(invGamma, warpAgg, smem.tpose[threadIdx.x][threadIdx.y])};
-
-            float2 result;
-            WarpScan(smem.scan[threadIdx.y]).InclusiveScan(data, result, fn);
-            smem.tpose[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
-            tblock.sync();
-
-            if (isValid)
-            {
-                output_[scanDim][outerDim] = smem.tpose[threadIdx.y][threadIdx.x];
-            }
-            warpAgg = (threadIdx.x == 0) * __shfl_sync(0xFFFFFFFF, result.y, 31);
+            sample = input_[scanDim][outerDim];
         }
+        smem.tpose[threadIdx.y][threadIdx.x] = sample;
+        tblock.sync();
+
+        float2 data = {
+            .x = __int2float_rn(threadIdx.x), .y = __fmaf_rn(invGamma, warpAgg, smem.tpose[threadIdx.x][threadIdx.y])};
+
+        float2 result;
+        WarpScan(smem.scan[threadIdx.y]).InclusiveScan(data, result, fn);
+        smem.tpose[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
+        tblock.sync();
+
+        if (isValid)
+        {
+            output_[scanDim][outerDim] = smem.tpose[threadIdx.y][threadIdx.x];
+        }
+        warpAgg = (threadIdx.x == 0) * __shfl_sync(0xFFFFFFFF, result.y, 31);
     }
 }
 
@@ -75,7 +72,7 @@ void forward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Ten
     TORCH_CHECK_EQ(output.ndimension(), 3);
     TORCH_CHECK_EQ(output.is_contiguous(), true);
 
-    const dim3 blocksGrid(input.size(0));
+    const dim3 blocksGrid(input.size(0), ceil_div(static_cast<int>(input.size(2)), gThreadBlockDim));
     const dim3 threadsPerBlock(gThreadBlockDim, gThreadBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cuda",
         [&]()
@@ -105,37 +102,34 @@ __global__ void __launch_bounds__(gThreadBlockDim* gThreadBlockDim)
     const auto input_ = input[blockIdx.x];
     auto output_ = output[blockIdx.x];
 
-    const int outerEnd = ceil_div(input.size(2), gThreadBlockDim) * gThreadBlockDim;
+    const int outerDim = blockIdx.y * gThreadBlockDim + threadIdx.x;
     const int scanEnd = ceil_div(input.size(1), gThreadBlockDim) * gThreadBlockDim;
 
-    for (int outerDim = threadIdx.x; outerDim < outerEnd; outerDim += gThreadBlockDim)
+    float warpAgg{0};
+    for (int scanDim = scanEnd - threadIdx.y - 1; scanDim >= 0; scanDim -= gThreadBlockDim)
     {
-        float warpAgg{0};
-        for (int scanDim = scanEnd - threadIdx.y - 1; scanDim >= 0; scanDim -= gThreadBlockDim)
+        T sample = 0;
+        const bool isValid = outerDim < input.size(2) && scanDim < input.size(1);
+        if (isValid)
         {
-            T sample = 0;
-            const bool isValid = outerDim < input.size(2) && scanDim < input.size(1);
-            if (isValid)
-            {
-                sample = input_[scanDim][outerDim];
-            }
-            smem.tpose[threadIdx.y][threadIdx.x] = sample;
-            tblock.sync();
-
-            float2 data = {.x = __int2float_rn(gThreadBlockDim - threadIdx.x),
-                .y = __fmaf_rn(invGamma, warpAgg, smem.tpose[threadIdx.x][threadIdx.y])};
-
-            float2 result;
-            WarpScan(smem.scan[threadIdx.y]).InclusiveScan(data, result, fn);
-            smem.tpose[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
-            tblock.sync();
-
-            if (isValid)
-            {
-                output_[scanDim][outerDim] = smem.tpose[threadIdx.y][threadIdx.x];
-            }
-            warpAgg = (threadIdx.x == 0) * __shfl_sync(0xFFFFFFFF, result.y, 31);
+            sample = input_[scanDim][outerDim];
         }
+        smem.tpose[threadIdx.y][threadIdx.x] = sample;
+        tblock.sync();
+
+        float2 data = {.x = __int2float_rn(gThreadBlockDim - threadIdx.x),
+            .y = __fmaf_rn(invGamma, warpAgg, smem.tpose[threadIdx.x][threadIdx.y])};
+
+        float2 result;
+        WarpScan(smem.scan[threadIdx.y]).InclusiveScan(data, result, fn);
+        smem.tpose[threadIdx.x][threadIdx.y] = static_cast<T>(result.y);
+        tblock.sync();
+
+        if (isValid)
+        {
+            output_[scanDim][outerDim] = smem.tpose[threadIdx.y][threadIdx.x];
+        }
+        warpAgg = (threadIdx.x == 0) * __shfl_sync(0xFFFFFFFF, result.y, 31);
     }
 }
 
@@ -146,7 +140,7 @@ void backward_cuda_noncontig(const torch::Tensor& input, double gamma, torch::Te
     TORCH_CHECK_EQ(output.ndimension(), 3);
     TORCH_CHECK_EQ(output.is_contiguous(), true);
 
-    const dim3 blocksGrid(input.size(0));
+    const dim3 blocksGrid(input.size(0), ceil_div(static_cast<int>(input.size(2)), gThreadBlockDim));
     const dim3 threadsPerBlock(gThreadBlockDim, gThreadBlockDim);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cuda",
         [&]()
