@@ -118,7 +118,6 @@ TORCH_LIBRARY(discounted_cumsum, m)
  */
 auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torch::Tensor
 {
-    TORCH_CHECK(input.is_contiguous());
     if (dim < 0) // wrap to [0,ndim]
     {
         dim += input.ndimension();
@@ -127,14 +126,14 @@ auto forward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> torc
 
     if (dim == (input.ndimension() - 1))
     {
-        torch::Tensor inputFlat = input.flatten(0, -2);
+        torch::Tensor inputFlat = input.flatten(0, -2).contiguous();
         output = output.reshape_as(inputFlat);
         forward_cuda_contig(inputFlat, gamma, output);
     }
     else
     {
         torch::Tensor inputFlat = dim == 0 ? input.unsqueeze(0) : input.flatten(0, dim - 1);
-        inputFlat = inputFlat.flatten(2, -1);
+        inputFlat = inputFlat.flatten(2, -1).contiguous();
         output = output.reshape_as(inputFlat);
         forward_cuda_noncontig(inputFlat, gamma, output);
     }
@@ -157,12 +156,23 @@ auto backward_cuda(const torch::Tensor& input, int64_t dim, double gamma) -> tor
     {
         dim += input.ndimension();
     }
-    torch::Tensor inputFlat = permuteDimToLast(input, dim);
-    auto output = torch::zeros_like(inputFlat);
+    auto output = torch::empty_like(input);
 
-    backward_cuda_contig(inputFlat, gamma, output);
+    if (dim == (input.ndimension() - 1))
+    {
+        torch::Tensor inputFlat = input.flatten(0, -2).contiguous();
+        output = output.reshape_as(inputFlat);
+        backward_cuda_contig(inputFlat, gamma, output);
+    }
+    else
+    {
+        torch::Tensor inputFlat = dim == 0 ? input.unsqueeze(0) : input.flatten(0, dim - 1);
+        inputFlat = inputFlat.flatten(2, -1).contiguous();
+        output = output.reshape_as(inputFlat);
+        backward_cuda_noncontig(inputFlat, gamma, output);
+    }
 
-    restoreOutputShape(output, input.sizes(), dim);
+    output = output.reshape_as(input);
     return output;
 }
 
@@ -187,7 +197,7 @@ auto forward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torch
         dim += input.ndimension();
     }
     torch::Tensor inputFlat = permuteDimToLast(input, dim);
-    auto output = torch::zeros_like(inputFlat);
+    auto output = torch::empty_like(inputFlat);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_forward_cpu",
         [&]()
@@ -221,7 +231,7 @@ auto backward_cpu(const torch::Tensor& input, int64_t dim, double gamma) -> torc
         dim += input.ndimension();
     }
     torch::Tensor inputFlat = permuteDimToLast(input, dim);
-    auto output = torch::zeros_like(inputFlat);
+    auto output = torch::empty_like(inputFlat);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "discounted_cumsum_backward_cpu",
         [&]()
