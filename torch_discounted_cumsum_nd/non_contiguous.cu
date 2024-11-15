@@ -103,10 +103,9 @@ __global__ void __launch_bounds__(gThreadBlockDim* gThreadBlockDim)
     const int scanEnd = ceil_div(input.size(1), gThreadBlockDim) * gThreadBlockDim;
 
     float warpAgg{0};
-    bool isValid = outerDim < input.size(2);
     for (int scanDim = scanEnd - threadIdx.y - 1; scanDim >= 0; scanDim -= gThreadBlockDim)
     {
-        isValid &= scanDim < input.size(1);
+        const bool isValid = outerDim < input.size(2) & scanDim < input.size(1);
         // TODO Nsight Compute shows Warp stall at STS, need to figure out how to reduce this
         smem.tpose[threadIdx.y][threadIdx.x] = isValid ? input_[scanDim][outerDim] : static_cast<T>(0);
         tblock.sync();

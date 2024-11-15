@@ -20,10 +20,10 @@ def make_data(shape: Sequence[int], device: str):
 
 
 _TEST_DEVICES = ["cpu", "cuda"]
-_TEST_SHAPES = [(4, 32), (12, 128, 30), (4, 32, 64), (4, 101, 99)]
+_TEST_SHAPES = [(4, 32), (12, 80, 30), (31, 33, 64), (40, 101, 99)]
 
 
-@pytest.mark.parametrize("dim", [0, -1])
+@pytest.mark.parametrize("dim", [0, 1, -1])
 @pytest.mark.parametrize("device", _TEST_DEVICES)
 @pytest.mark.parametrize("shape", _TEST_SHAPES)
 def test_forward_no_weighting(dim: int, device: str, shape: tuple[int, ...]):
@@ -34,7 +34,7 @@ def test_forward_no_weighting(dim: int, device: str, shape: tuple[int, ...]):
     assert torch.allclose(baseline, target, atol=1e-5)
 
 
-@pytest.mark.parametrize("dim", [0, -1])
+@pytest.mark.parametrize("dim", [0, 1, -1])
 @pytest.mark.parametrize("device", _TEST_DEVICES)
 @pytest.mark.parametrize("shape", _TEST_SHAPES)
 def test_backward_no_weighting(dim: int, device: str, shape: tuple[int, ...]):
@@ -58,7 +58,7 @@ def test_backward_no_weighting(dim: int, device: str, shape: tuple[int, ...]):
     assert torch.allclose(baseline_grad, test_grad, atol=1e-5)
 
 
-@pytest.mark.parametrize("dim", [0, -1])
+@pytest.mark.parametrize("dim", [0, 1, -1])
 @pytest.mark.parametrize("shape", _TEST_SHAPES)
 @pytest.mark.parametrize("gamma", [2, 5])
 def test_gamma_factor(dim: int, gamma: float, shape: tuple[int, ...]):
